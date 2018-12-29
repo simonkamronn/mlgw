@@ -2,7 +2,7 @@
 
 ## Install
 
-Put `bangolufsen.py` in /config/components/media_player/ and set up the devices in the configuration as 
+Put `bangolufsen.py` in `/config/custom_components/media_player/` and set up the devices in the configuration as 
 ``` 
 media_player:
   platform: bangolufsen
@@ -13,3 +13,7 @@ media_player:
     - device_name1
     - device_name2
  ```
+
+## Configure Masterlink Gateway
+
+Add the B&O devices to the gateway and assign the MLN numbers to the devices in the same order as the devices in the HA configuration
