@@ -2,7 +2,7 @@
 
 ## Install
 
-Put `bangolufsen.py` in `/config/custom_components/media_player/` and set up the devices in the configuration as 
+Put `bangolufsen` directory in `/config/custom_components/` and set up the devices in the configuration as 
 ``` 
 media_player:
   platform: bangolufsen
