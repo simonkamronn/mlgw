@@ -10,9 +10,9 @@ import socket
 import time
 import threading
 
-from homeassistant.components.media_player import (SUPPORT_TURN_OFF, SUPPORT_TURN_ON, 
-                                                   PLATFORM_SCHEMA, MediaPlayerDevice, 
-                                                   SUPPORT_SELECT_SOURCE, SUPPORT_VOLUME_STEP)
+from homeassistant.components.media_player import MediaPlayerDevice, PLATFORM_SCHEMA
+from homeassistant.components.media_player.const import (SUPPORT_TURN_OFF, SUPPORT_TURN_ON,
+                                                         SUPPORT_SELECT_SOURCE, SUPPORT_VOLUME_STEP)
 
 from homeassistant.const import (CONF_HOST, CONF_NAME, CONF_USERNAME, 
                                  CONF_PASSWORD, CONF_PORT, STATE_OFF,
@@ -24,6 +24,7 @@ import homeassistant.helpers.config_validation as cv
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
 
+DOMAIN = 'bangolufsen'
 DEFAULT_NAME = 'Beolink'
 DEFAULT_SOURCE = 'DVD'
 SUPPORT_BEO = SUPPORT_TURN_ON | SUPPORT_TURN_OFF | SUPPORT_VOLUME_STEP
