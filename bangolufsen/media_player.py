@@ -136,8 +136,9 @@ class BeoSpeaker(MediaPlayerDevice):
 
 # Turn on uses volume up which for most devices, turns it on without changing source, but it does nothing on the BeoSound system.
     def turn_on(self):
-        self._pwon = True
-        self.volume_up()
+#        self._pwon = True
+#        self.volume_up()
+        self.select_source(DEFAULT_SOURCE)
 
     def turn_off(self):
         self._pwon = False
