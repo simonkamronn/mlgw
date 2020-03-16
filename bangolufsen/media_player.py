@@ -3,6 +3,18 @@ Support for Bang & Olufsen Master Link Gateway.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/media_player.bangolufsen/
+
+This component only manages communication TO the MLGW. the MLGW protocolo only allows
+communication into MLGW.
+
+To enable Light commands to control Hass.io lights, need to create a "Custom Strings" device
+on MLGW with command strings like this:
+
+POST /api/services/scene/turn_on HTTP/1.1\0D\0AAuthorization: Bearer <your token>
+\0D\0AContent-Type: application/json\0D\0AContent-Length: 39
+\0D\0A\0D\0A{\"entity_id\": \"scene.<your scene>\"}
+
+
 """
 import logging
 import voluptuous as vol
@@ -10,24 +22,36 @@ import socket
 import time
 import threading
 
-from homeassistant.components.media_player import MediaPlayerDevice, PLATFORM_SCHEMA
-from homeassistant.components.media_player.const import (SUPPORT_TURN_OFF, SUPPORT_TURN_ON,
-                                                         SUPPORT_SELECT_SOURCE, SUPPORT_VOLUME_STEP)
+#from homeassistant.components.media_player import (SUPPORT_TURN_OFF, SUPPORT_TURN_ON, 
+#                                                   PLATFORM_SCHEMA, MediaPlayerDevice, 
+#                                                   SUPPORT_SELECT_SOURCE, SUPPORT_VOLUME_STEP)
 
 from homeassistant.const import (CONF_HOST, CONF_NAME, CONF_USERNAME, 
                                  CONF_PASSWORD, CONF_PORT, STATE_OFF,
                                  STATE_ON, STATE_UNKNOWN, CONF_DEVICES,
                                  EVENT_HOMEASSISTANT_STOP)
 
+from homeassistant.components.media_player import (
+    MediaPlayerDevice,
+    PLATFORM_SCHEMA)
+
+from homeassistant.components.media_player.const import (
+    SUPPORT_TURN_ON,
+    SUPPORT_TURN_OFF,
+    SUPPORT_SELECT_SOURCE,
+    SUPPORT_VOLUME_STEP,
+    SUPPORT_VOLUME_MUTE
+)
+
 import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
 
-DOMAIN = 'bangolufsen'
 DEFAULT_NAME = 'Beolink'
-DEFAULT_SOURCE = 'DVD'
-SUPPORT_BEO = SUPPORT_TURN_ON | SUPPORT_TURN_OFF | SUPPORT_VOLUME_STEP
+# A.MEM is the aux port of the Beosound system that is connected with my chromecast 
+DEFAULT_SOURCE = 'A.MEM'
+SUPPORT_BEO = SUPPORT_TURN_ON | SUPPORT_TURN_OFF | SUPPORT_VOLUME_STEP | SUPPORT_SELECT_SOURCE | SUPPORT_VOLUME_MUTE 
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_HOST, default='192.168.1.10'): cv.string,
@@ -58,7 +82,9 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
 
     if gateway.connected:
         _LOGGER.info('Adding devices: ' + ', '.join(devices))
-        add_devices([BeoSpeaker(i + 1, device, gateway) for i, device in enumerate(devices)])
+        mp_devices = [BeoSpeaker(i + 1, device, gateway) for i, device in enumerate(devices)]
+        add_devices(mp_devices)
+        gateway.add_devices(mp_devices)
     else:
         _LOGGER.error('Not connected')
 
@@ -69,6 +95,7 @@ class BeoSpeaker(MediaPlayerDevice):
         self._name = name
         self._gateway = gateway
         self._pwon = False
+        self._source = DEFAULT_SOURCE
 
     @property
     def name(self):
@@ -89,6 +116,17 @@ class BeoSpeaker(MediaPlayerDevice):
         return SUPPORT_BEO
 
     @property
+    def source(self):
+        """Name of the current input source."""
+        self._source = self._gateway.beolink_source
+        return self._source
+
+    @property
+    def source_list(self):
+        """List of available input sources."""
+        return ['CD', 'RADIO', 'A.MEM']
+
+    @property
     def state(self):
         """Return the state of the device."""
         if self._pwon:
@@ -96,9 +134,10 @@ class BeoSpeaker(MediaPlayerDevice):
         else:
             return STATE_OFF
 
+# Turn on uses volume up which for most devices, turns it on without changing source, but it does nothing on the BeoSound system.
     def turn_on(self):
         self._pwon = True
-        self.select_source(DEFAULT_SOURCE)
+        self.volume_up()
 
     def turn_off(self):
         self._pwon = False
@@ -106,13 +145,17 @@ class BeoSpeaker(MediaPlayerDevice):
 
     def select_source(self, source):
         self._pwon = True
-        self._gateway.beo4_cmd(self._mln, 0x01, BEO4_CMDS.get(source))
+        self._source = source
+        self._gateway.beo4_cmd_source(self._mln, 0x01, self._source)
 
     def volume_up(self):
         self._gateway.beo4_cmd(self._mln, 0x01, BEO4_CMDS.get('VOLUME UP'))
 
     def volume_down(self):
         self._gateway.beo4_cmd(self._mln, 0x01, BEO4_CMDS.get('VOLUME DOWN'))
+
+    def mute_volume(self, mute):
+        self._gateway.beo4_cmd(self._mln, 0x01, BEO4_CMDS.get('MUTE'))
 
 
 class MLGateway:
@@ -125,8 +168,21 @@ class MLGateway:
         self.buffersize = 1024
         self._socket = None
         self.connected = False
-        self.telegramlogging = False
+        self.telegramlogging = True
         self.stopped = threading.Event()
+        self._devices = None
+        self._sourceMLN = 1 
+        self._source = DEFAULT_SOURCE
+        self._sourceMediumPosition = 0xffff
+        self._sourcePosition = 0x00ff
+        self._sourceActivity = None
+        self._pictureFormat = None
+
+    ## Return last selected source or last source status received from mlgw
+    @property
+    def beolink_source(self):
+#        _LOGGER.info("Beolink source " + self._source)
+        return self._source
 
     ## Open tcp connection to mlgw
     def connect(self):
@@ -157,6 +213,7 @@ class MLGateway:
         else:
             _LOGGER.info("Opened connection to ML Gateway on IP " + self._tcpip + ":" + str(self._port))
         self.connected = True
+        self.ping()
 
     ## Login
     def login(self):
@@ -205,9 +262,14 @@ class MLGateway:
         self._payload.append(mln)              # byte[0] MLN
         self._payload.append(dest)             # byte[1] Dest-Sel (0x00, 0x01, 0x05, 0x0f)
         self._payload.append(cmd)              # byte[2] Beo4 Command
-#        self._payload.append(0x00)             # byte[3] Sec-Source
-#        self._payload.append(0x00)             # byte[3] Link
+        self._payload.append(0x00)             # byte[3] Sec-Source
+        self._payload.append(0x00)             # byte[3] Link
         self.send(0x01, self._payload)
+
+    ## Send Beo4 commmand and store the source name
+    def beo4_cmd_source(self, mln, dest, source):
+        self._source = source
+        self.beo4_cmd(mln, dest, BEO4_CMDS.get(source))
 
     def virtual_btn_press(self, btn):
         self.send(0x20, [btn])
@@ -243,14 +305,25 @@ class MLGateway:
                         _LOGGER.info('Virtual button pressed: ' + VIRTUAL_BTN.get(virtual_btn, 'Unk'))
 
                 if msg_byte == 0x31:
-                    if msg_type == 'FAIL':
+                    if msg_payload == 'FAIL':
                         _LOGGER.info('Login needed')
                         self.login()
-                    elif msg_type == 'OK':
+                    elif msg_payload == 'OK':
                         _LOGGER.info('Login successful')
+                        self.get_serial()
 
                 elif msg_byte == 0x37:
                     _LOGGER.info('pong')
+
+                elif msg_byte == 0x02:
+                    _LOGGER.info(f'Msg type: {msg_type}. Payload: {msg_payload}')
+                    self._sourceMLN = _getmlnstr( response[4] ) 
+                    self._source = _getselectedsourcestr( response[5] ).upper()
+#                    _LOGGER.info("Beolink source " + self._source)
+                    self._sourceMediumPosition = _hexword( response[6], response[7] )
+                    self._sourcePosition = _hexword( response[8], response[9] )
+                    self._sourceActivity = _getdictstr( sourceactivitydict, response[10] )
+                    self._pictureFormat = _getdictstr( pictureformatdict, response[11] )
 
                 else:
                     _LOGGER.info(f'Msg type: {msg_type}. Payload: {msg_payload}')
@@ -422,9 +495,9 @@ def _getraumstr( raum ):
     return result
 
 def _getmlnstr( mln ):
-    result = mlndict.get( mln )
-    if result == None:
-        result = "MLN=" + str( mln )
+#    result = mlndict.get( mln )
+#    if result == None:
+    result = "MLN=" + str( mln )
     return result
     
 def _getbeo4commandstr( command ):
@@ -533,3 +606,5 @@ if __name__ == '__main__':
 
     # gateway.close()
     time.sleep(10)
+
+
