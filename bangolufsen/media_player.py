@@ -19,8 +19,8 @@ Configuration example:
 media_player:
   platform: bangolufsen
   host: 192.168.1.10
-  username: usr00
-  password: usr00
+  username: admin
+  password: admin
   port: 9000
   default_source: A.MEM
   available_sources:
