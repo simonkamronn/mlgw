@@ -14,6 +14,29 @@ POST /api/services/scene/turn_on HTTP/1.1\0D\0AAuthorization: Bearer <your token
 \0D\0AContent-Type: application/json\0D\0AContent-Length: 39
 \0D\0A\0D\0A{\"entity_id\": \"scene.<your scene>\"}
 
+Configuration example:
+
+media_player:
+  platform: bangolufsen
+  host: 192.168.1.10
+  username: usr00
+  password: usr00
+  port: 9000
+  default_source: A.MEM
+  available_sources:
+    - A.MEM
+    - CD
+    - RADIO
+  devices:
+    - BeoSound
+    - BeoLab3500LR
+    - Patio
+    - BeoLabStudio
+    - TVRoom
+    - Bedroom
+    - Bathroom
+
+Devices need to be defined in the same order as the MLGW configuration, and MLNs need to be sequential, starting from 1 for the first one.
 
 """
 import logging
@@ -51,6 +74,9 @@ _LOGGER.setLevel(logging.INFO)
 DEFAULT_NAME = 'Beolink'
 # A.MEM is the aux port of the Beosound system that is connected with my chromecast 
 DEFAULT_SOURCE = 'A.MEM'
+AVAILABLE_SOURCES = ['CD', 'RADIO', 'A.MEM'] 
+CONF_DEFAULT_SOURCE = 'default_source'
+CONF_AVAILABLE_SOURCES = 'available_sources'
 SUPPORT_BEO = SUPPORT_TURN_ON | SUPPORT_TURN_OFF | SUPPORT_VOLUME_STEP | SUPPORT_SELECT_SOURCE | SUPPORT_VOLUME_MUTE 
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -59,6 +85,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_USERNAME, default='admin'): cv.string,
     vol.Optional(CONF_PASSWORD, default='admin'): cv.string,
     vol.Optional(CONF_PORT, default=9000): cv.positive_int,
+    vol.Optional(CONF_DEFAULT_SOURCE, default=DEFAULT_SOURCE): cv.string,
+    vol.Optional(CONF_AVAILABLE_SOURCES, default=AVAILABLE_SOURCES): cv.ensure_list,
 })
 
 
@@ -68,8 +96,10 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     password = config.get(CONF_PASSWORD)
     port = config.get(CONF_PORT)
     devices = config.get(CONF_DEVICES)
+    default_source = config.get(CONF_DEFAULT_SOURCE)
+    available_sources = config.get(CONF_AVAILABLE_SOURCES)
 
-    gateway = MLGateway(host, username, password, port)
+    gateway = MLGateway(host, username, password, port, default_source, available_sources)
     gateway.connect()
 
     def _stop_listener(_event):
@@ -84,7 +114,6 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
         _LOGGER.info('Adding devices: ' + ', '.join(devices))
         mp_devices = [BeoSpeaker(i + 1, device, gateway) for i, device in enumerate(devices)]
         add_devices(mp_devices)
-        gateway.add_devices(mp_devices)
     else:
         _LOGGER.error('Not connected')
 
@@ -95,7 +124,7 @@ class BeoSpeaker(MediaPlayerDevice):
         self._name = name
         self._gateway = gateway
         self._pwon = False
-        self._source = DEFAULT_SOURCE
+        self._source = self._gateway.beolink_source
 
     @property
     def name(self):
@@ -117,14 +146,14 @@ class BeoSpeaker(MediaPlayerDevice):
 
     @property
     def source(self):
-        """Name of the current input source."""
+        """Name of the current input source. Because the source is common across all the speakers connected to the gateway, we just pass through the beolink."""
         self._source = self._gateway.beolink_source
         return self._source
 
     @property
     def source_list(self):
         """List of available input sources."""
-        return ['CD', 'RADIO', 'A.MEM']
+        return self._gateway.available_sources
 
     @property
     def state(self):
@@ -134,11 +163,11 @@ class BeoSpeaker(MediaPlayerDevice):
         else:
             return STATE_OFF
 
-# Turn on uses volume up which for most devices, turns it on without changing source, but it does nothing on the BeoSound system.
     def turn_on(self):
+        self.select_source(self._gateway.beolink_source)
+# An alternate is to turn on with volume up which for most devices, turns it on without changing source, but it does nothing on the BeoSound system.
 #        self._pwon = True
 #        self.volume_up()
-        self.select_source(DEFAULT_SOURCE)
 
     def turn_off(self):
         self._pwon = False
@@ -160,7 +189,7 @@ class BeoSpeaker(MediaPlayerDevice):
 
 
 class MLGateway:
-    def __init__(self, host='192.168.1.10', user='admin', password='admin', port=9000):
+    def __init__(self, host, user, password, port, default_source, available_sources):
         self._host = host
         self._user = user
         self._password = password
@@ -171,19 +200,24 @@ class MLGateway:
         self.connected = False
         self.telegramlogging = True
         self.stopped = threading.Event()
-        self._devices = None
         self._sourceMLN = 1 
-        self._source = DEFAULT_SOURCE
+        self._source = default_source
         self._sourceMediumPosition = 0xffff
         self._sourcePosition = 0x00ff
         self._sourceActivity = None
         self._pictureFormat = None
+        self._available_sources = available_sources
 
     ## Return last selected source or last source status received from mlgw
     @property
     def beolink_source(self):
 #        _LOGGER.info("Beolink source " + self._source)
         return self._source
+
+    @property
+    def available_sources(self):
+#        _LOGGER.info("Beolink source " + self._source)
+        return self._available_sources
 
     ## Open tcp connection to mlgw
     def connect(self):
