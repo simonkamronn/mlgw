@@ -1,26 +1,32 @@
 """
-Support for Bang & Olufsen Master Link Gateway.
+Support for Bang & Olufsen Master Link Gateway and Beolink Gateway.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/media_player.bangolufsen/
 
-This component only manages communication TO the MLGW. the MLGW protocolo only allows
-communication into MLGW.
+This component manages communication To and From the MLGW.
 
-To enable Light commands to control Hass.io lights, need to create a "Custom Strings" device
-on MLGW with command strings like this:
+Controlling Devices and Speakers, like Beosound and Beolab, is done simply through a media_player controller in the UI. I use mini_media_player.
+
+This platform also forwards Virtual Buttons and Light/Control commands from the Masterlink to Home Assistant.
+
+There are two ways to enable Light commands to control Hass.io lights.
+
+First is to create a "Custom Strings" device on MLGW with command strings like this:
 
 POST /api/services/scene/turn_on HTTP/1.1\0D\0AAuthorization: Bearer <your token>
 \0D\0AContent-Type: application/json\0D\0AContent-Length: 39
 \0D\0A\0D\0A{\"entity_id\": \"scene.<your scene>\"}
+
+The second is to listen to Virtual Button and Light events fired by the platform.
 
 Configuration example:
 
 media_player:
   platform: bangolufsen
   host: 192.168.1.10
-  username: admin
-  password: admin
+  username: usr00
+  password: usr00
   port: 9000
   default_source: A.MEM
   available_sources:
@@ -55,7 +61,7 @@ from homeassistant.const import (CONF_HOST, CONF_NAME, CONF_USERNAME,
                                  EVENT_HOMEASSISTANT_STOP)
 
 from homeassistant.components.media_player import (
-    MediaPlayerDevice,
+    MediaPlayerEntity,
     PLATFORM_SCHEMA)
 
 from homeassistant.components.media_player.const import (
@@ -69,10 +75,10 @@ from homeassistant.components.media_player.const import (
 import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
-_LOGGER.setLevel(logging.INFO)
+# _LOGGER.setLevel(logging.ERROR)
 
 DEFAULT_NAME = 'Beolink'
-# A.MEM is the aux port of the Beosound system that is connected with my chromecast 
+# A.MEM is the aux port of the Beosound system. For modern uses of Beosound it is typically the most used source 
 DEFAULT_SOURCE = 'A.MEM'
 AVAILABLE_SOURCES = ['CD', 'RADIO', 'A.MEM'] 
 CONF_DEFAULT_SOURCE = 'default_source'
@@ -99,7 +105,7 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     default_source = config.get(CONF_DEFAULT_SOURCE)
     available_sources = config.get(CONF_AVAILABLE_SOURCES)
 
-    gateway = MLGateway(host, username, password, port, default_source, available_sources)
+    gateway = MLGateway(host, port, username, password, default_source, available_sources, hass)
     gateway.connect()
 
     def _stop_listener(_event):
@@ -114,11 +120,17 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
         _LOGGER.info('Adding devices: ' + ', '.join(devices))
         mp_devices = [BeoSpeaker(i + 1, device, gateway) for i, device in enumerate(devices)]
         add_devices(mp_devices)
+        gateway.set_devices(mp_devices) # tell the gateway the list of devices connected to it.
     else:
         _LOGGER.error('Not connected')
 
+"""
+BeoSpeaker represents a single MasterLink device on the Masterlink bus. E.g., a speaker like BeoSound 3500 or a Masterlink Master device like a receiver or TV (e.g, a Beosound 3000)
 
-class BeoSpeaker(MediaPlayerDevice):
+Because the Masterlink has only one active source across all the speakers, we maintain the source state in the Gateway class, which manages the relationship with the Masterlink Gateway. It's not very clean, but it works.
+
+"""
+class BeoSpeaker(MediaPlayerEntity):
     def __init__(self, mln, name, gateway):
         self._mln = mln
         self._name = name
@@ -136,7 +148,7 @@ class BeoSpeaker(MediaPlayerDevice):
 
     @property
     def supported_features(self):
-        """Flag media player features that are supported."""
+        # Flag media player features that are supported.
         return SUPPORT_BEO
 
     @property
@@ -146,7 +158,7 @@ class BeoSpeaker(MediaPlayerDevice):
 
     @property
     def source(self):
-        """Name of the current input source. Because the source is common across all the speakers connected to the gateway, we just pass through the beolink."""
+        # Name of the current input source. Because the source is common across all the speakers connected to the gateway, we just pass through the beolink.
         self._source = self._gateway.beolink_source
         return self._source
 
@@ -163,6 +175,13 @@ class BeoSpeaker(MediaPlayerDevice):
         else:
             return STATE_OFF
 
+    def set_state(self, _state):
+# to be called by the gateway to set the state to off when there is an event on the ml bus that turns off the device
+        if _state == STATE_ON:
+            self._pwon = True
+        elif _state == STATE_OFF:
+            self._pwon = False
+
     def turn_on(self):
         self.select_source(self._gateway.beolink_source)
 # An alternate is to turn on with volume up which for most devices, turns it on without changing source, but it does nothing on the BeoSound system.
@@ -171,25 +190,30 @@ class BeoSpeaker(MediaPlayerDevice):
 
     def turn_off(self):
         self._pwon = False
-        self._gateway.beo4_cmd(self._mln, 0x01, BEO4_CMDS.get('STANDBY'))
+        self._gateway.send_beo4_cmd(self._mln, reverse_destselectordict.get('AUDIO SOURCE'), BEO4_CMDS.get('STANDBY'))
 
     def select_source(self, source):
         self._pwon = True
         self._source = source
-        self._gateway.beo4_cmd_source(self._mln, 0x01, self._source)
+        self._gateway.send_beo4_cmd_source(self._mln, reverse_destselectordict.get('AUDIO SOURCE'), self._source)
 
     def volume_up(self):
-        self._gateway.beo4_cmd(self._mln, 0x01, BEO4_CMDS.get('VOLUME UP'))
+        self._gateway.send_beo4_cmd(self._mln, reverse_destselectordict.get('AUDIO SOURCE'), BEO4_CMDS.get('VOLUME UP'))
 
     def volume_down(self):
-        self._gateway.beo4_cmd(self._mln, 0x01, BEO4_CMDS.get('VOLUME DOWN'))
+        self._gateway.send_beo4_cmd(self._mln, reverse_destselectordict.get('AUDIO SOURCE'), BEO4_CMDS.get('VOLUME DOWN'))
 
     def mute_volume(self, mute):
-        self._gateway.beo4_cmd(self._mln, 0x01, BEO4_CMDS.get('MUTE'))
+        self._gateway.send_beo4_cmd(self._mln, reverse_destselectordict.get('AUDIO SOURCE'), BEO4_CMDS.get('MUTE'))
 
+"""
+MLGateway class manages the communication with the Masterlink Gateway. There are two devices that can be controlled this way: The MasterLink Gateway MK2 and the Beolink Gateway. See https://beointegration.com/ for more information about these products.
 
+These integrations allow Home Assistant to control your legacy Bang & Olufsen MasterLink device network.
+
+"""
 class MLGateway:
-    def __init__(self, host, user, password, port, default_source, available_sources):
+    def __init__(self, host, port, user, password, default_source, available_sources, hass):
         self._host = host
         self._user = user
         self._password = password
@@ -207,17 +231,21 @@ class MLGateway:
         self._sourceActivity = None
         self._pictureFormat = None
         self._available_sources = available_sources
+        self._devices = None
+        self._hass = hass
 
     ## Return last selected source or last source status received from mlgw
     @property
     def beolink_source(self):
-#        _LOGGER.info("Beolink source " + self._source)
         return self._source
 
     @property
     def available_sources(self):
-#        _LOGGER.info("Beolink source " + self._source)
         return self._available_sources
+
+# populate the list of devices configured on the gateway.
+    def set_devices(self, devices):
+        self._devices = devices
 
     ## Open tcp connection to mlgw
     def connect(self):
@@ -292,7 +320,7 @@ class MLGateway:
                 _LOGGER.info("mlgw: >SENT: " + _getpayloadtypestr(msg_type) + ": " + _getpayloadstr(self._telegram))  # debug
 
     ## Send Beo4 command to mlgw
-    def beo4_cmd(self, mln, dest, cmd):
+    def send_beo4_cmd(self, mln, dest, cmd):
         self._payload = bytearray()
         self._payload.append(mln)              # byte[0] MLN
         self._payload.append(dest)             # byte[1] Dest-Sel (0x00, 0x01, 0x05, 0x0f)
@@ -302,18 +330,12 @@ class MLGateway:
         self.send(0x01, self._payload)
 
     ## Send Beo4 commmand and store the source name
-    def beo4_cmd_source(self, mln, dest, source):
+    def send_beo4_cmd_source(self, mln, dest, source):
         self._source = source
-        self.beo4_cmd(mln, dest, BEO4_CMDS.get(source))
+        self.send_beo4_cmd(mln, dest, BEO4_CMDS.get(source))
 
-    def virtual_btn_press(self, btn):
+    def send_virtual_btn_press(self, btn):
         self.send(0x20, [btn])
-
-    def all_on(self):
-        self.virtual_btn_press(1)
-
-    def all_standby(self):
-        self.virtual_btn_press(2)
 
     def _listen(self):
         while not self.stopped.isSet():
@@ -327,19 +349,23 @@ class MLGateway:
                 continue
 
             if response is not None:
-                # Decode response
+                # Decode response. Response[0] is SOH, or 0x01
                 msg_byte = response[1]
                 msg_type = _getpayloadtypestr(msg_byte)
                 msg_payload = _getpayloadstr(response)
 
                 _LOGGER.debug(f'Msg type: {msg_type}. Payload: {msg_payload}')
 
-                if msg_byte == 0x20:
-                    if response[5] == 1:
-                        virtual_btn = response[4]
-                        _LOGGER.info('Virtual button pressed: ' + VIRTUAL_BTN.get(virtual_btn, 'Unk'))
+                if msg_byte == 0x20: # Virtual Button event
+                    virtual_btn = response[4]
+                    if len(response)<5:
+                        virtual_action = _getvirtualactionstr(0x01)
+                    else: 
+                        virtual_action = _getvirtualactionstr(response[5])
+                    _LOGGER.info(f'Virtual button pressed: button {virtual_btn} action {virtual_action}' )
+                    self._hass.bus.fire("bangolufsen_virtual_button", {"button": virtual_btn, "action": virtual_action})
 
-                if msg_byte == 0x31:
+                elif msg_byte == 0x31: # Login Status
                     if msg_payload == 'FAIL':
                         _LOGGER.info('Login needed')
                         self.login()
@@ -347,18 +373,30 @@ class MLGateway:
                         _LOGGER.info('Login successful')
                         self.get_serial()
 
-                elif msg_byte == 0x37:
+                elif msg_byte == 0x37: # Pong (Ping response)
                     _LOGGER.info('pong')
 
-                elif msg_byte == 0x02:
+                elif msg_byte == 0x02: # Source status
                     _LOGGER.info(f'Msg type: {msg_type}. Payload: {msg_payload}')
                     self._sourceMLN = _getmlnstr( response[4] ) 
                     self._source = _getselectedsourcestr( response[5] ).upper()
-#                    _LOGGER.info("Beolink source " + self._source)
                     self._sourceMediumPosition = _hexword( response[6], response[7] )
                     self._sourcePosition = _hexword( response[8], response[9] )
                     self._sourceActivity = _getdictstr( sourceactivitydict, response[10] )
                     self._pictureFormat = _getdictstr( pictureformatdict, response[11] )
+
+                elif msg_byte == 0x05: # All Standby
+                    _LOGGER.info(f'Msg type: {msg_type}. Payload: {msg_payload}')
+                    if self._devices is not None: # set all connected devices state to off
+                        for i in self._devices:
+                            i.set_state(STATE_OFF)
+
+                elif msg_byte == 0x04: # Light / Control command
+                    lcroom = _getroomstr( response[4] )
+                    lctype = _getdictstr( lctypedict, response[5] )
+                    lccommand = _getbeo4commandstr( response[6] )
+                    _LOGGER.info(f'Light/Control command: room: {lcroom} type: {lctype} command {lccommand}')
+                    self._hass.bus.fire("bangolufsen_light_control_event", {"room": response[4], "type": lctype, "command": lccommand})
 
                 else:
                     _LOGGER.info(f'Msg type: {msg_type}. Payload: {msg_payload}')
@@ -404,7 +442,8 @@ def _hexword(byte1, byte2):
     resultstr = _hexbyte(byte1) + resultstr[2:]
     return resultstr
 
-VIRTUAL_BTN = {1:'All on', 2:'All off'}
+# ########################################################################################
+# ##### MLGW Protocol packet constants
 
 payloadtypedict = dict([
     (0x01, "Beo4 Command"), (0x02, "Source Status"), (0x03, "Pict&Snd Status"),
@@ -450,6 +489,16 @@ beo4commanddict = dict([
     ])
 
 BEO4_CMDS = {v.upper(): k for k, v in beo4commanddict.items()}
+
+destselectordict = dict([
+    (0x00, "Video Source"), (0x01, "Audio Source"), (0x05, "V.TAPE/V.MEM"), (0x0f, "All Products")
+    ])
+
+reverse_destselectordict = {v.upper(): k for k, v in destselectordict.items()}
+
+virtualactiondict = dict([
+    (0x01, "PRESS"), (0x02, "HOLD"), (0x03, "RELEASE")
+    ])
 
 selectedsourcedict = dict( [
     (0x0b, "TV"), (0x15, "V.Mem"), (0x1f, "DTV"), (0x29, "DVD"), 
@@ -513,7 +562,7 @@ loginstatusdict = dict( [
     ] )
 
 # ########################################################################################
-# ##### Decode MLGW Protokoll packet to readable string
+# ##### Decode MLGW Protocol packet to readable string
 
 ## Get decoded string for mlgw packet's payload type
 #
@@ -523,41 +572,43 @@ def _getpayloadtypestr( payloadtype ):
             result = "UNKNOWN (type=" + _hexbyte( payloadtype ) + ")"
         return str(result)
 
-def _getraumstr( raum ):
-    result = roomdict.get( raum )
-    if result == None:
-        result = "Room=" + str( raum )
+def _getroomstr( room ):
+    result = "Room=" + str( room )
     return result
 
 def _getmlnstr( mln ):
-#    result = mlndict.get( mln )
-#    if result == None:
     result = "MLN=" + str( mln )
     return result
     
 def _getbeo4commandstr( command ):
-        result = beo4commanddict.get( command )
-        if result == None:
-            result = "Cmd=" + _hexbyte( command )
-        return result
+    result = beo4commanddict.get( command )
+    if result == None:
+        result = "Cmd=" + _hexbyte( command )
+    return result
+
+def _getvirtualactionstr( action ):
+    result = virtualactiondict.get( action )
+    if result == None:
+        result = "Action=" + _hexbyte( action )
+    return result
 
 def _getselectedsourcestr( source ):
-        result = selectedsourcedict.get( source )
-        if result == None:
-            result = "Src=" + _hexbyte( source )
-        return result
+    result = selectedsourcedict.get( source )
+    if result == None:
+        result = "Src=" + _hexbyte( source )
+    return result
 
 def _getspeakermodestr( source ):
-        result = speakermodedict.get( source )
-        if result == None:
-            result = "mode=" + _hexbyte( source )
-        return result
+    result = speakermodedict.get( source )
+    if result == None:
+        result = "mode=" + _hexbyte( source )
+    return result
 
 def _getdictstr( mydict, mykey ):
-        result = mydict.get( mykey )
-        if result == None:
-            result = _hexbyte( mykey )
-        return result
+    result = mydict.get( mykey )
+    if result == None:
+        result = _hexbyte( mykey )
+    return result
 
 
 ## Get decoded string for a mlgw packet
@@ -601,7 +652,7 @@ def _getpayloadstr( message ):
             resultstr = resultstr + " " + _getdictstr( stereoindicatordict, message[13] )
 
     elif message[1] == 0x04:       # Light and Control command
-        resultstr = _getraumstr( message[4] ) + " " + _getdictstr( lctypedict, message[5] ) + " " + _getbeo4commandstr( message[6] )
+        resultstr = _getroomstr( message[4] ) + " " + _getdictstr( lctypedict, message[5] ) + " " + _getbeo4commandstr( message[6] )
 
     elif message[1] == 0x30:       # Login request
         wrk = message[4:4+message[2]]
