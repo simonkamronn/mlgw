@@ -1,3 +1,8 @@
+## Archived
+This repo has been archieved. Please find an up-to-date library at https://github.com/giachello/mlgw
+
+-------
+
 # Bang & Olufsen Home Assistant component
 
 ## Install
